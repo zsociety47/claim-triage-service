@@ -1,0 +1,13 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Secrets - never committed, only .env.example is
+.env
+
+# Local databases
+*.db
+
+# OS noise
+.DS_Store
