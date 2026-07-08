@@ -21,26 +21,32 @@ instead of requiring the boundary to be re-derived from scratch.
 ## Async job + polling vs. blocking API until classification finishes
 **Options considered:**
 - **Blocking (synchronous):** `POST /denials` calls Claude inside the
-  request handler and does not return until classification is complete.
+  request handler and does not return until classification is finished.
   One HTTP round-trip; simpler stack (no Celery worker, no Redis queue).
 - **Async + polling:** `POST /denials` validates input, writes a row with
-  status `pending`, enqueues a Celery task, and returns **202 Accepted**
+  status `queued`, enqueues a Celery task, and returns **202 Accepted**
   immediately with the denial ID and current status. A separate Celery
   worker process picks up the task, calls Claude (or the CARC fallback),
-  and updates the row. The caller **polls** `GET /denials/{id}` until
-  status reaches a terminal state (`complete` or `failed`).
+  and updates the row. The caller **polls** `GET /denials/{id}` (or
+  `GET /denials?status=classified`) until status reaches a terminal state
+  (`classified` or `failed`). Status lifecycle: `queued` → `processing`
+  (worker active) → `classified` or `failed`.
 
 **Chosen:** async + polling (Celery + Redis)
 
-**Why:** Claude latency is unpredictable — a single denial can take seconds
-or much longer. Holding the HTTP connection open ties up API capacity, risks
-gateway/load-balancer timeouts (often 30–60s), and couples throughput to
-how many concurrent blocking requests the API can sustain. Accepting the
-job immediately and processing in a background worker keeps the API fast
-and stateless, isolates LLM timeouts to the worker, lets workers scale
-independently of the API, and lets the UI show status (`pending`,
-`processing`) right after submit instead of a frozen page. Matches the
-Candid Health stack pattern (Celery + Redis for task queues).
+**Why:** the API server's connection pool must stay free to serve other
+requests. Blocking on Claude's variable latency lets enough concurrent
+submissions exhaust that pool and stall the entire API, not just denial
+submissions. Accepting the job immediately and processing in a separately
+scalable Celery worker pool isolates slow LLM work from the API, avoids
+gateway timeouts, and lets the UI show `queued` / `processing` right after
+submit instead of a frozen page. Review Service stays stateless — each
+browser poll triggers one fresh call to Classifier; Review does not run
+its own background polling loop. Matches the Candid Health stack pattern
+(Celery + Redis for task queues).
+
+**Status naming:** `classified` not `complete` — Classifier owns
+classification only; human review in Review Service is a separate step.
 
 ---
 

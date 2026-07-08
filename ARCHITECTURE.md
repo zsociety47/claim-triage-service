@@ -83,21 +83,21 @@ sequenceDiagram
   participant LLM as Claude or CARC fallback
 
   Caller->>API: POST /denials plus X-Service-Key
-  API->>DB: insert row status pending
+  API->>DB: insert row status queued
   API->>Redis: enqueue classify task
-  API-->>Caller: 202 Accepted denial id status pending
+  API-->>Caller: 202 Accepted denial id status queued
 
   loop Poll until terminal
     Caller->>API: GET /denials/id plus X-Service-Key
     API->>DB: read row
-    API-->>Caller: status pending processing complete or failed
+    API-->>Caller: status queued processing classified or failed
   end
 
   Worker->>Redis: pick up task
   Worker->>DB: status processing
   Worker->>LLM: classify denial
   LLM-->>Worker: action confidence reasoning
-  Worker->>DB: status complete plus result fields
+  Worker->>DB: status classified plus result fields
 ```
 
 **Recommended actions** returned by Classifier: `appeal`, `resubmit_corrected`,
@@ -170,10 +170,53 @@ flowchart LR
 
 ---
 
+## Task queue: Celery/Redis vs Cloud Tasks (demo vs GCP-native fork)
+
+This belongs in ARCHITECTURE.md (not DECISIONS.md) — same product, different
+hosting choices for the async classification pipeline.
+
+### What we build (demo + Candid-pattern match)
+
+Candid Health's JD describes **Celery + Redis** for task queues. Our demo
+and Terraform "honest model" follow that shape:
+
+- Classifier API enqueues a task after `POST /denials` returns 202.
+- **Redis** is the broker; Celery worker **blocking-pops** work (worker
+  consumes the queue — not the same as Review's HTTP polling).
+- Worker calls Claude, writes `classified` or `failed` back to Classifier DB.
+- Review Service stays stateless; the **browser** polls Review, and each
+  poll triggers a fresh `GET` to Classifier.
+
+```mermaid
+flowchart LR
+  API[Classifier API] -->|"enqueue"| Redis[(Redis)]
+  Redis -->|"blocking pop"| Worker[Celery Worker]
+  Worker --> Claude[Claude or CARC]
+  Worker --> DB[(Classifier DB)]
+```
+
+### Documented production fork: GCP Cloud Tasks
+
+If this were deployed GCP-natively without self-managed Celery/Redis:
+
+| Concern | Celery + Redis (built) | Cloud Tasks (fork) |
+|---------|------------------------|---------------------|
+| Delivery | Worker pulls from Redis | **Push** HTTP to worker endpoint |
+| Auth between services | `X-Service-Key` shared secret | **OIDC** token on task delivery |
+| Retries / backoff | Celery task config + broker | Queue config (rate limits, retry policy) |
+| Ops burden | Run Redis + worker fleet (Memorystore + Cloud Run) | Managed queue; no Redis to operate |
+
+Cloud Tasks does not change the **async shape** (accept job fast, classify
+later, poll for status) — only **who runs the queue** and **how the worker
+is invoked**. The Review → Classifier polling contract stays the same.
+
+---
+
 ## Repository layout (planned)
 
 ```
 claim-triage-service/
+├── CLAUDE.md             # session memory — how to work, repo state, build order
 ├── DECISIONS.md          # why we built it this way
 ├── ARCHITECTURE.md       # this file — what the system looks like
 ├── docker-compose.yml    # local full stack
